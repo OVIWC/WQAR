@@ -1,0 +1,277 @@
+---
+title: "WQAR Template"
+format:
+  html:
+    toc: true
+  docx:
+    toc: true
+editor_options: 
+  markdown: 
+    wrap: 72
+execute:
+  echo: false
+  eval: true
+  output: true
+  warning: false
+  error: true
+  results: true
+  cache: false
+prefer-html: true
+---
+
+![](http://www.oviwc.org/wp-content/uploads/2022/10/IMG_8054-scaled.jpg)
+
+By Owens Valley Indian Water Commission
+
+## Atlas Table of Tribal Water Resources
+
+This atlas should include the estimated number of stream miles, lake
+acres, wetland acres, or estuarine square miles within tribal
+boundaries.
+
+## Narrative Description of Tribal Water Quality Monitoring Programs and Assessment Methods
+
+*(Some or most of this information can be copy and pasted from your
+QAPP)*
+
+-   Purpose of monitoring program
+
+-   Number of stream miles/lake or wetland acres/estuary square miles
+    monitored
+
+-   Parameters monitored
+
+-   Monitoring frequency
+
+-   Discussion of any applicable Water Quality Indicators (WQI), tribal
+    goals, or standards
+
+-   Coordination or collaboration with other organizations
+
+-   Any lab support
+
+-   How data are interpreted and managed
+
+## Narrative Description of Results of Water Quality Monitoring Within Tribal Boundaries
+
+This is an interpretation and summary of the findings of tribal
+monitoring activities, including probable causes and sources of
+impairment. Depending on program sophistication, summary tables should
+be included to show which water bodies meet tribal goals or designated
+uses.
+
+```{r Libraries}
+
+# These are some of the libraries (code packages) that we need. You will need to install these. If you are using RStudio use Packages -> Install.
+
+library(tidyverse)
+library(glue)
+library(dataRetrieval)
+library(janitor)
+library(purrr)
+library(gt)
+library(ggmap)
+library(plotly)
+library(DT)
+library(htmlwidgets)
+library(leaflet)
+```
+
+```{r Data, warning=FALSE}
+
+### This section of code loads the data for the report 
+
+# The code below loads the data for your tribe that has been submitted to the EPA via WQX/STORET. This data is retrieved from the Water Quality Portal (https://www.waterqualitydata.us)
+
+OrgID <- "OVIWC" # Replace the letters between the quotes with your official Organization ID from WQX/Water Quality Portal. A list of the Organizational IDs can be found here: http://www.oviwc.org/wp-content/uploads/2022/10/TribalOrganizationIDs.xlsx
+
+URL <- glue("https://www.waterqualitydata.us/data/Result/search?organization=", OrgID, "&mimeType=csv&zip=yes&dataProfile=resultPhysChem&providers=NWIS&providers=STEWARDS&providers=STORET") # This creates a URL specific to your Tribe's water quality data 
+
+Data <- importWQP(URL, zip = TRUE, tz = "UTC", csv = TRUE) # This function from the USGS dataRetrival package pulls your data from the Water Quality Portal
+
+
+```
+
+```{r Tidy}
+
+### This is a section to wrangle and tidy your data 
+
+Data <- Data %>%
+    remove_empty("cols") %>% # Janitor package function to remove columns with only NAs
+    clean_names() %>% # Janitor package function to make column names more readable
+    mutate(activity_start_date = as.Date(activity_start_date), 
+         result_measure_value = as.numeric(result_measure_value),
+         activity_location_longitude_measure = as.numeric(activity_location_longitude_measure),
+         activity_location_latitude_measure = as.numeric(activity_location_latitude_measure)) %>% # Mutate function ensures key columns are the correct data class for analysis
+    mutate(site_name = abbreviate(monitoring_location_name)) # Creates new column with shortened site names
+    
+
+
+
+```
+
+```{r Static Map}
+
+### Creates static map of monitoring sites 
+
+bounding <- c(
+  left = min(Data$activity_location_longitude_measure) - 0.03,
+  bottom = min(Data$activity_location_latitude_measure) - 0.03,
+  right = max(Data$activity_location_longitude_measure) + 0.03,
+  top = max(Data$activity_location_latitude_measure) + 0.03) # Creates a lat long bounding box to download basemap tiles. Bounding plus and minus extras margins might have to be adjusted 
+
+sites_basemap <- get_stamenmap(bounding, zoom = 12,  maptype = "terrain") # Downloads basemap tiles. Zoom may need to be adjusted. max zzom is 18, can take a long time to download
+
+ggmap(sites_basemap) +
+  geom_point(data = Data, aes(x = activity_location_longitude_measure, y = activity_location_latitude_measure), color = "black") + 
+  geom_text(data = Data,aes(x = activity_location_longitude_measure, y = activity_location_latitude_measure, label = site_name), size = 3, color = "black", hjust = -0.25) + #hjust may need to be played with for readability
+  labs(title = "Surface Water Monitoring Sites", x = "Longitude", y = "Latitude")
+
+```
+
+------------------------------------------------------------------------
+
+```{r leaflet map}
+
+leaflet_map <- leaflet(width = "100%") %>%
+  addTiles('https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}') %>% # basemaps can be changed to other OSM basemaps
+  addCircleMarkers(data = Data, ~activity_location_longitude_measure, ~activity_location_latitude_measure, fillOpacity = 0.5, radius=3, color = "purple",
+                   popup=~paste("<strong>Site Name:</strong>", monitoring_location_name,
+                                "<br>",
+                                "<strong>Site Abbreviation:</strong>",site_name))
+leaflet_map
+```
+
+```{r plotting functions, message=FALSE, warning=FALSE, results='hide'}
+
+## This section contains functions to plot water quality results
+
+# 1. Basic plot for a single water quality characteristic at all sites. Input is just the characteristic, e.g. wq_plot("Temperature, water").
+
+wq_plot <- function(characteristic) {
+  Data <-  Data %>%
+    filter(characteristic_name == characteristic) %>% # filters data by characteristic entered into function
+    mutate(unit = first(result_measure_measure_unit_code)) # Saves Unit to plot on y axis 
+  
+    ggplot(Data, aes(x = activity_start_date, y = result_measure_value, color = site_name)) + 
+        geom_point() +
+        facet_grid(rows = vars(site_name)) +
+        geom_line() +
+        theme(legend.position="bottom") +
+        theme_light() +
+        labs(title = characteristic, x = "Date", y = Data$unit)
+
+}
+
+# 2. Function to create ggplot chart of a single characteristic with a water quality limit line. Inputs are a characteristic and a numeric standard, e.g. wq_plot_wqstandard("Turbidity", 25)
+
+wq_plot_wqstandard <- function(characteristic, wqstandard) {
+  Data <- Data %>%
+    filter(characteristic_name == characteristic) %>% # filters data by characteristic entered into function
+    mutate(unit = first(result_measure_measure_unit_code)) # Saves Unit to plot on y axis
+  
+    ggplot(Data, aes(x = activity_start_date, y = result_measure_value, color = site_name)) + 
+        geom_point() +
+        facet_grid(rows = vars(site_name)) + # Separates graph by site
+        geom_line() +
+        geom_hline(aes(yintercept = wqstandard), linetype = "dashed", color = "red") + # Creates line at WQ standard
+        labs(title = characteristic, x = "Date", y = Data$unit) + # Adds unit to y axis (might not work)
+    theme(legend.title=element_blank()) # Removes titles from legend 
+        
+}
+
+# 3. Function to create an interactive ggplotly graph for html output (will not work with Word). Input is a characteristic, e.g. wq_plot_plotly("Turbidity"). To use purrr::map to print a list of all characteristics: plotly_list <- map(unique(Data$characteristic_name), wq_plot_plotly)
+  #htmltools::tagList(plotly_list)
+
+wq_plot_plotly <- function(characteristic) {
+  fig <- Data %>%
+    filter(characteristic_name == characteristic) # Filters data by select characteristic
+ 
+  a <-  ggplot(data = fig, aes(x = activity_start_date, y = result_measure_value, color = site_name)) + 
+          geom_point() +
+          labs(title = characteristic, x = "Date", y = NULL) # Creates ggplot
+        
+  p <- ggplotly(a) # Feed ggplot into ggplotly function to create interactive chart
+  
+  print(p)
+}
+
+
+# Example: Plot all characterisitcs in dataset using purrr::map function
+
+map(unique(Data$characteristic_name), wq_plot)
+
+```
+
+------------------------------------------------------------------------
+
+```{r table, results='asis'}
+
+
+wq_table <- function(start_date, end_date) {
+Data %>%
+  filter(activity_start_date >= start_date & activity_start_date <= end_date) %>%
+  select(activity_start_date, characteristic_name, result_measure_value, result_measure_measure_unit_code, site_name) %>%
+  pivot_wider(names_from = site_name, values_from = result_measure_value) %>%
+  gt(groupname_col = "activity_start_date") %>%
+  tab_header(
+    title = "Water Quality Results",
+    subtitle = glue("{start_date} to {end_date}")) %>%
+  cols_label( characteristic_name ="Characteristic",
+               result_measure_measure_unit_code="Unit") %>%
+  fmt_date(columns = (activity_start_date), date_style = 5) %>%
+  sub_missing( # Reassign NAs for another column
+    columns = (-characteristic_name), # For variable 'Solar.R', make "NA"s
+    missing_text = "-") %>%
+  tab_spanner(
+    label = "WQ Sites",
+    columns = c(-characteristic_name, -result_measure_measure_unit_code)) %>%
+   tab_style(
+     locations = cells_title(groups = "title"),
+     style     = list(cell_text(weight = "bold"))) %>%
+  tab_options(row_group.font.weight  = "bold") %>%
+  fmt_number(
+    columns = c(-characteristic_name, -result_measure_measure_unit_code), 
+    decimals = 1) # With 2 decimal places
+
+}
+
+wq_table("2020-07-01", "2021-01-01")
+
+```
+
+------------------------------------------------------------------------
+
+```{r, html table}
+
+wq_table_html <- function(start_date, end_date) {
+  Data %>%
+  filter(activity_start_date >= start_date & activity_start_date <= end_date) %>%
+  select(activity_start_date, characteristic_name, result_measure_value, result_measure_measure_unit_code, site_name) %>%
+  datatable(., extensions = c("Buttons" , "FixedColumns"),
+           filter = 'top',
+           options = list( autoWidth = TRUE , 
+                           dom = 'Blftip',
+                           pageLength = 20,
+                           searchHighlight = FALSE,
+                           buttons = c('copy', 'csv', 'print'),
+                           scrollX = TRUE,
+                           fixedColumns = list(leftColumns = 2)),
+           class = c('compact cell-border stripe hover') ,
+           rownames = FALSE)
+}
+wq_table_html("2020-07-01", "2021-01-01")
+```
+
+## Discussion of Issues of Tribal Concern Regarding Water Quality
+
+This discussion should identify any issues of concern or potential
+future impacts to the water bodies where the monitoring program is
+occurring. Examples include: outbreaks of waterborne disease, fish
+kills, etc. As a program advances, tables should be developed to
+summarize various sources of impairment by stream miles.
+
+## Resources
+
+[EPA Region 9 Reporting
+Requirements](https://www.epa.gov/tribal-pacific-sw/r9tribal106)
